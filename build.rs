@@ -1,16 +1,121 @@
-extern crate pkg_config;
+extern crate lazy_static;
+
+use lazy_static::lazy_static;
+use std::collections::HashMap;
+use std::env;
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+lazy_static! {
+    static ref TRIPLE_TRANSLATIONS: HashMap<&'static str, &'static str> = {
+        let mut hm = HashMap::new();
+        hm.insert("armv7-unknown-linux-gnueabihf", "arm-linux-gnueabihf");
+        hm
+    };
+}
 
 fn main() {
-    if let Err(e) = pkg_config::probe_library("alsa") {
-        match e {
-            pkg_config::Error::Failure { .. } => panic! (
-                "Pkg-config failed - usually this is because alsa development headers are not installed.\n\n\
-                For Fedora users:\n# dnf install alsa-lib-devel\n\n\
-                For Debian/Ubuntu users:\n# apt-get install libasound2-dev\n\n\
-                pkg_config details:\n{}",
-                e
-            ),
-            _ => panic!("{}", e)
+    let manifest_dir = PathBuf::from(cargo_env("CARGO_MANIFEST_DIR"));
+    let out_dir = PathBuf::from(cargo_env("OUT_DIR"));
+    let alsa_dir = manifest_dir.join("alsa-lib");
+
+    let build_dir = out_dir.join("build");
+    let install_dir = out_dir.join("install");
+    fs::create_dir_all(&build_dir).expect("Could not create build dir");
+    fs::create_dir_all(&install_dir).expect("Could not create install dir");
+
+    let host = cargo_env("HOST").into_string().expect("Could not convert HOST into a string");
+    let mut target = cargo_env("TARGET").into_string().expect("Could not convert TARGET into a string");
+
+    if let Some(translated) = TRIPLE_TRANSLATIONS.get(target.as_str()) {
+        target = translated.to_string();
+    }
+
+    if host == target {
+        // Option 1: pkg-config.
+        let mut pc = pkg_config::Config::new();
+        match pc.atleast_version("1.2").statik(true).probe("alsa") {
+            Ok(..) => return,
+            Err(pkg_config::Error::Failure { .. }) => println!("cargo:warning=Could not find alsa at least v1.2 with pkg-config. Falling back on built-in version. If you wanted to link to the system alsa-lib, you might need to install pkg-config and alsa-lib-devel or libasound2-dev."),
+            Err(e) => panic!("Unknown error: {}", e),
+        }
+
+        // Option 2: Build from the built-in copy for a normal compile.
+        prebuild_alsa(&alsa_dir);
+        configure_alsa(&alsa_dir, &build_dir, None);
+        build_alsa(&build_dir);
+        install_alsa(&build_dir, &install_dir);
+    } else {
+        // Option 3: Build from the built-in copy for a cross compile.
+        prebuild_alsa(&alsa_dir);
+        configure_alsa(&alsa_dir, &build_dir, Some(&target));
+        build_alsa(&build_dir);
+        install_alsa(&build_dir, &install_dir);
+    }
+}
+
+fn cargo_env(name: &str) -> OsString {
+    env::var_os(name).expect(&format!("Environment variable not found: {}", name))
+}
+
+fn prebuild_alsa(alsa_dir: &Path) {
+    let mut cmd = Command::new("libtoolize");
+    cmd.current_dir(alsa_dir).args(&["--force", "--copy", "--automake"]);
+    execute(cmd);
+
+    let mut cmd = Command::new("aclocal");
+    cmd.current_dir(alsa_dir);
+    execute(cmd);
+
+    let mut cmd = Command::new("autoheader");
+    cmd.current_dir(alsa_dir);
+    execute(cmd);
+
+    let mut cmd = Command::new("automake");
+    cmd.current_dir(alsa_dir).args(&["--foreign", "--copy", "--add-missing"]);
+    execute(cmd);
+
+    let mut cmd = Command::new("autoconf");
+    cmd.current_dir(alsa_dir);
+    execute(cmd);
+}
+
+fn configure_alsa(alsa_dir: &Path, build_dir: &Path, cross_host: Option<&str>) {
+    let mut cmd = Command::new("sh");
+    let configure = alsa_dir.join("configure").to_string_lossy().to_owned().to_string();
+    cmd.current_dir(build_dir).arg("-c");
+
+    match cross_host {
+        Some(host) => {
+            let config = format!("{} --enable-shared=no --enable-static=yes --host={}", configure, host);
+            cmd.arg(config);
+        },
+        None => {
+            let config = format!("{} --enable-shared=no --enable-static=yes", configure);
+            cmd.arg(config);
         }
     }
+
+    execute(cmd);
+}
+
+fn build_alsa(build_dir: &Path) {
+    let mut cmd = Command::new("make");
+    cmd.current_dir(build_dir);
+    execute(cmd);
+}
+
+fn install_alsa(build_dir: &Path, install_dir: &Path) {
+    let mut cmd = Command::new("make");
+    cmd.current_dir(build_dir)
+        .arg("install")
+        .env("DESTDIR", install_dir);
+    execute(cmd);
+}
+
+fn execute(mut command: Command) {
+    println!("$ {:?}", command);
+    command.status().expect(&format!("Could not execute {:?}", command));
 }
