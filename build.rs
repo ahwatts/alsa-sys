@@ -27,11 +27,7 @@ fn main() {
     fs::create_dir_all(&install_dir).expect("Could not create install dir");
 
     let host = cargo_env("HOST").into_string().expect("Could not convert HOST into a string");
-    let mut target = cargo_env("TARGET").into_string().expect("Could not convert TARGET into a string");
-
-    if let Some(translated) = TRIPLE_TRANSLATIONS.get(target.as_str()) {
-        target = translated.to_string();
-    }
+    let target = cargo_env("TARGET").into_string().expect("Could not convert TARGET into a string");
 
     if host == target {
         // Option 1: pkg-config.
@@ -41,23 +37,37 @@ fn main() {
             Err(pkg_config::Error::Failure { .. }) => println!("cargo:warning=Could not find alsa at least v1.2 with pkg-config. Falling back on built-in version. If you wanted to link to the system alsa-lib, you might need to install pkg-config and alsa-lib-devel or libasound2-dev."),
             Err(e) => panic!("Unknown error: {}", e),
         }
-
-        // Option 2: Build from the built-in copy for a normal compile.
-        prebuild_alsa(&alsa_dir);
-        configure_alsa(&alsa_dir, &build_dir, None);
-        build_alsa(&build_dir);
-        install_alsa(&build_dir, &install_dir);
-    } else {
-        // Option 3: Build from the built-in copy for a cross compile.
-        prebuild_alsa(&alsa_dir);
-        configure_alsa(&alsa_dir, &build_dir, Some(&target));
-        build_alsa(&build_dir);
-        install_alsa(&build_dir, &install_dir);
     }
+
+    let mut target2: Option<&str> = None;
+    if host != target {
+        if let Some(translated) = TRIPLE_TRANSLATIONS.get(target.as_str()) {
+            target2 = Some(translated.as_ref());
+        } else {
+            target2 = Some(&target);
+        }
+    }
+
+    // Option 2&3: Build from the built-in copy for a normal or cross compile.
+    build_alsa(&alsa_dir, &build_dir, &install_dir, target2);
+    let lib_dir = install_dir.join("usr").join("lib")
+        .to_str()
+        .expect("Could not convert lib dir to a string")
+        .to_string();
+    println!("cargo:rustc-link-search={}", lib_dir);
+    println!("cargo:rustc-link-lib=asound");
+    println!("cargo:rustc-link-lib=atopology");
 }
 
 fn cargo_env(name: &str) -> OsString {
     env::var_os(name).expect(&format!("Environment variable not found: {}", name))
+}
+
+fn build_alsa(alsa_dir: &Path, build_dir: &Path, install_dir: &Path, target: Option<&str>) {
+    prebuild_alsa(&alsa_dir);
+    configure_alsa(&alsa_dir, &build_dir, target);
+    compile_alsa(&build_dir);
+    install_alsa(&build_dir, &install_dir);
 }
 
 fn prebuild_alsa(alsa_dir: &Path) {
@@ -101,7 +111,7 @@ fn configure_alsa(alsa_dir: &Path, build_dir: &Path, cross_host: Option<&str>) {
     execute(cmd);
 }
 
-fn build_alsa(build_dir: &Path) {
+fn compile_alsa(build_dir: &Path) {
     let mut cmd = Command::new("make");
     cmd.current_dir(build_dir);
     execute(cmd);
