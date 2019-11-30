@@ -4,4 +4,5 @@ bindgen \
     --whitelist-var "^IEC958_.*" \
     --whitelist-var "^MIDI_.*" \
     --whitelist-type "^snd_.*" \
+    --blacklist-type "pollfd" \
     $@
